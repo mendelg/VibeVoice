@@ -7,6 +7,8 @@ import torch
 import warnings
 import random
 
+from vibevoice.finetune.speakers import normalize_script, count_speakers
+
 try:
     import librosa  # type: ignore
 except Exception:  # pragma: no cover
@@ -40,11 +42,17 @@ class VibeVoiceDataset:
         text_column: str = "text",
         audio_column: str = "audio",
         voice_prompts_column: Optional[str] = "voice_prompts",
+        normalize_speaker_ids: bool = False,
     ) -> None:
         self.dataset = dataset
         self.text_column = text_column
         self.audio_column = audio_column
         self.voice_prompts_column = voice_prompts_column
+        # Renumber "Speaker N:" lines to 0..N-1 by first appearance and align the voice prompts
+        # with them, the way inference does. Required for multi-speaker (podcast) rows; optional
+        # for single-speaker rows to keep older recipes byte-identical.
+        self.normalize_speaker_ids = normalize_speaker_ids
+        self._warned_multi_no_prompt = False
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -58,13 +66,38 @@ class VibeVoiceDataset:
         user_provided_prompt = None
         if self.voice_prompts_column and self.voice_prompts_column in item:
             user_provided_prompt = item[self.voice_prompts_column]
+        if isinstance(user_provided_prompt, dict):
+            user_provided_prompt = {k: v for k, v in user_provided_prompt.items() if v is not None} or None
+        elif isinstance(user_provided_prompt, list):
+            user_provided_prompt = [v for v in user_provided_prompt if v is not None] or None
 
+        if self.normalize_speaker_ids:
+            data["text"], user_provided_prompt, _ = normalize_script(data["text"], user_provided_prompt)
+        elif isinstance(user_provided_prompt, dict):
+            raise ValueError("voice_prompts given as a dict requires normalize_speaker_ids=True")
+
+        num_speakers = count_speakers(data["text"])
         if user_provided_prompt:
             # A prompt was provided in the dataset, so we use it.
             if not isinstance(user_provided_prompt, list):
                 data["voice_prompts"] = [user_provided_prompt]
             else:
                 data["voice_prompts"] = user_provided_prompt
+            if len(data["voice_prompts"]) < num_speakers:
+                raise ValueError(
+                    f"Item {idx}: {len(data['voice_prompts'])} voice prompt(s) for {num_speakers} speakers. "
+                    "Multi-speaker rows need one prompt per speaker (see FINETUNING.md, podcast section)."
+                )
+        elif num_speakers > 1:
+            # A random crop of a multi-speaker recording would label a mix of voices as Speaker 0.
+            # Train these rows without voice prompts instead (as voice_prompt_drop_rate would).
+            if not self._warned_multi_no_prompt:
+                warnings.warn(
+                    f"Item {idx} has {num_speakers} speakers but no voice_prompts; training it without prompts. "
+                    "Provide one prompt per speaker for voice-conditioned podcast training."
+                )
+                self._warned_multi_no_prompt = True
+            data["voice_prompts"] = None
         else:
             # FALLBACK: No prompt provided, so we auto-generate one from the target audio.
             try:

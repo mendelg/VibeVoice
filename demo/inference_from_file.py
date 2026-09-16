@@ -8,6 +8,7 @@ import torch
 
 from vibevoice.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
 from vibevoice.modular.lora_loading import load_lora_assets
+from vibevoice.finetune.speakers import normalize_script
 from vibevoice.processor.vibevoice_processor import VibeVoiceProcessor
 from transformers.utils import logging
 
@@ -178,6 +179,12 @@ def parse_args():
         help="Path to a fine-tuned checkpoint directory containing LoRA adapters (optional)",
     )
     parser.add_argument(
+        "--normalize_speaker_ids",
+        action="store_true",
+        help="Renumber 'Speaker N:' lines to 0..N-1 by first appearance so text ids match the voice prompt labels "
+             "(use with adapters trained with --normalize_speaker_ids True)",
+    )
+    parser.add_argument(
         "--disable_prefill",
         action="store_true",
         help="Disable speech prefill (voice cloning) by setting is_prefill=False during generation",
@@ -282,6 +289,9 @@ def main():
     # Prepare data for model
     full_script = '\n'.join(scripts)
     full_script = full_script.replace("’", "'")        
+    if args.normalize_speaker_ids:
+        full_script, voice_samples, original_ids = normalize_script(full_script, voice_samples)
+        print(f"Normalized speaker ids {original_ids} -> {list(range(len(original_ids)))}")
     
     print(f"Loading processor & model from {args.model_path}")
     processor = VibeVoiceProcessor.from_pretrained(args.model_path)

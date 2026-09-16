@@ -139,6 +139,11 @@ class DataArguments:
         default=0.0,
         metadata={"help": "Probability to drop conditioning voice prompt during training (0.0 keep always, 1.0 drop always)."},
     )
+    normalize_speaker_ids: bool = field(
+        default=False,
+        metadata={"help": "Renumber 'Speaker N:' lines to 0..N-1 by first appearance and align voice_prompts with them "
+                          "(list ordered by first appearance, or dict keyed by original id). Required for multi-speaker rows."},
+    )
 
 @dataclass
 class CustomTrainingArguments(HfTrainingArguments):
@@ -511,6 +516,7 @@ def main() -> None:
         text_column=data_args.text_column_name,
         audio_column=data_args.audio_column_name,
         voice_prompts_column=data_args.voice_prompts_column_name,
+        normalize_speaker_ids=data_args.normalize_speaker_ids,
     )
     eval_dataset = None
     if eval_ds is not None:
@@ -519,6 +525,7 @@ def main() -> None:
             text_column=data_args.text_column_name,
             audio_column=data_args.audio_column_name,
             voice_prompts_column=data_args.voice_prompts_column_name,
+            normalize_speaker_ids=data_args.normalize_speaker_ids,
         )
 
     # Ratios/dims from processor+model

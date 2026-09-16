@@ -48,8 +48,47 @@ python -m vibevoice.finetune.train_vibevoice \
 
 ## Notes
 
-- Currently, only single-speaker finetuning is supported. Podcast fine-tuning is not supported yet.
+- Multi-speaker (podcast) fine-tuning is supported: see the section below. It has been checked at the token level against inference, not yet validated by the original authors.
 - This is an unofficial finetuning implementation, it has not been validated by the original authors.
-- The `voice_prompts_column_name` parameter is currently set to `audio` in the example above, which means the same audio file is used for both training data and voice prompts. This is appropriate when you don't have separate voice prompt files. However, if your dataset includes dedicated voice prompt files (short audio clips that capture the target speaker's voice characteristics), you should specify a different column name that contains these separate voice prompt files. For podcast-style training (once it is supported), the model typically uses the first utterance from each speaker within the podcast episode as the voice prompt, meaning the voice prompt is extracted from the beginning of the same audio file used for training.
+- The `voice_prompts_column_name` parameter is currently set to `audio` in the example above, which means the same audio file is used for both training data and voice prompts. This is appropriate when you don't have separate voice prompt files. However, if your dataset includes dedicated voice prompt files (short audio clips that capture the target speaker's voice characteristics), you should specify a different column name that contains these separate voice prompt files. For podcast-style training the voice prompt for each speaker is a clip of that speaker from the same episode, outside the training window; `prepare_podcast_jsonl.py` picks one per speaker.
 - The dataset text/transcript must be in the format of "Speaker X: text", even if there is only one speaker. Example: `Speaker 1: Hello, how are you?`
 - The default dataset is the Jenny (Dioco) dataset. This is a small dataset for testing purposes and each segment is only a few seconds long. The model may struggle to generate long audio with this dataset.
+
+## Multi-speaker (podcast) fine-tuning
+
+A podcast row is one continuous recording of several speakers plus a script with one `Speaker N:` line per turn and **one voice prompt per speaker**:
+
+```json
+{"text": "Speaker 0: I heard there is big news?\nSpeaker 1: Yes! ...\nSpeaker 0: Tell me more.",
+ "audio": "windows/ep01/000012.wav",
+ "voice_prompts": ["prompts/ep01/A_120.40.wav", "prompts/ep01/B_88.10.wav"]}
+```
+
+The processor labels prompts `Speaker 0`, `Speaker 1`, ... by position, so the text must use 0-based ids in order of first appearance and `voice_prompts` must be in that order. Pass `--normalize_speaker_ids True` to the trainer and it renumbers whatever ids your rows use (`voice_prompts` may then also be a dict keyed by the original id, e.g. `{"1": "a.wav", "2": "b.wav"}`). Rows with fewer prompts than speakers fail loudly; rows with no prompts are trained prompt-less, like `voice_prompt_drop_rate` does. Cutting a random prompt from the target audio (the single-speaker fallback) is never done for multi-speaker rows.
+
+Everything else in the training loop is unchanged: the whole window is the diffusion target, prompts are input only, and the sequence is exactly the inference prompt followed by the target latents (`tests/test_multispeaker_finetune.py` checks this against the processor).
+
+### Building rows from diarized episodes
+
+```bash
+python -m vibevoice.finetune.prepare_podcast_jsonl \
+    --episodes episodes.jsonl --out data/podcast \
+    --min-seconds 8 --max-seconds 60 --max-gap 2.0 --require-speaker-change \
+    --min-confidence 0.8 --dry-run          # counts and hours only; drop --dry-run to cut audio
+```
+
+`episodes.jsonl` has one line per episode: `{"id", "audio", "turns": [{"speaker", "start", "end", "text", "confidence"?}], "prompts"?: {speaker: wav}}`. Windows are consecutive turns cut from the original recording, so gaps, overlaps and reactions are real. Long textless turns and low-confidence turns end a window instead of being generated without text. Validation holds out whole episodes.
+
+Then train as in the example above with:
+
+```
+--train_jsonl data/podcast/train.jsonl --validation_jsonl data/podcast/validation.jsonl \
+--text_column_name text --audio_column_name audio --voice_prompts_column_name voice_prompts \
+--normalize_speaker_ids True --voice_prompt_drop_rate 0.2
+```
+
+Windows of 60 s are about 450 speech tokens plus prompts; a 24 GB GPU handles the 1.5B model at batch size 1-2 with `--gradient_checkpointing True`. For inference, `demo/inference_from_file.py --normalize_speaker_ids` applies the same renumbering to your script so it matches training.
+
+### New language
+
+The same path teaches a new language: the text tokenizer (Qwen2.5) already covers most scripts byte-wise, so nothing needs to be added to the vocabulary; the LoRA on the language model and the trained diffusion head learn the pronunciation from your audio. Expect to need several hours of clean, accurately transcribed speech, and judge checkpoints by listening.
