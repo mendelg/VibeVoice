@@ -893,6 +893,15 @@ def main() -> None:
 
             return (total, outputs) if return_outputs else total
 
+        def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+            """Evaluation: the batches carry no 'labels' key, so the stock Trainer would skip the loss
+            and report only the runtime. Compute the same CE + diffusion loss as training instead,
+            so eval_loss on held-out episodes is a real overfitting signal."""
+            inputs = self._prepare_inputs(inputs)
+            with torch.no_grad():
+                loss = self.compute_loss(model, inputs)
+            return (loss.detach(), None, None)
+
         def _debug_ce(self, shift_logits: torch.Tensor, ce_labels: torch.Tensor, attention_mask: Optional[torch.Tensor], acoustic_input_mask: Optional[torch.Tensor]):
             try:
                 if not getattr(training_args, "debug_ce_details", False):
