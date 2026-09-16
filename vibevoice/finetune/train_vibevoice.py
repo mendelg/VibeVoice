@@ -961,7 +961,7 @@ def main() -> None:
     
                 # --- Diffusion head PEFT adapters (if LoRA-wrapped) ---
                 pred_head = getattr(self.model.model, "prediction_head", None)
-                if hasattr(pred_head, "save_pretrained"):
+                if hasattr(pred_head, "peft_config") and hasattr(pred_head, "save_pretrained"):
                     ph_dir = os.path.join(lora_out, "diffusion_head")
                     os.makedirs(ph_dir, exist_ok=True)
                     pred_head.save_pretrained(ph_dir)
@@ -1068,21 +1068,17 @@ def main() -> None:
         if hasattr(lm, "save_pretrained"):
             lm.save_pretrained(lora_out)
     
-        # Diffusion head PEFT (if any)
+        # Diffusion head: PEFT adapter if LoRA-wrapped, otherwise the full state_dict once
+        # (lora_loading falls back to lora/diffusion_head_full.bin). The plain head is a
+        # PreTrainedModel too, so save_pretrained would write a third 1.3 GB copy on the 7B.
         ph = getattr(model.model, "prediction_head", None)
-        if hasattr(ph, "save_pretrained"):
+        if ph is not None and hasattr(ph, "peft_config") and hasattr(ph, "save_pretrained"):
             ph_dir = os.path.join(lora_out, "diffusion_head")
             os.makedirs(ph_dir, exist_ok=True)
             ph.save_pretrained(ph_dir)
-    
-        # ALWAYS: full diffusion head state_dict fallback
         try:
             if ph is not None and hasattr(ph, "state_dict"):
-                sd = ph.state_dict()
-                torch.save(sd, os.path.join(lora_out, "diffusion_head_full.bin"))
-                ph_dir = os.path.join(lora_out, "diffusion_head")
-                os.makedirs(ph_dir, exist_ok=True)
-                torch.save(sd, os.path.join(ph_dir, "diffusion_head_full.bin"))
+                torch.save(ph.state_dict(), os.path.join(lora_out, "diffusion_head_full.bin"))
         except Exception as e:
             logger.warning(f"Failed to save FULL diffusion head at end: {e}")
     
