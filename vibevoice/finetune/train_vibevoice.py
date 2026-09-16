@@ -150,6 +150,16 @@ class CustomTrainingArguments(HfTrainingArguments):
     ddpm_batch_mul: int = field(default=1)
     ce_loss_weight: float = field(default=1.0)
     diffusion_loss_weight: float = field(default=1.0)
+    ce_include_speech_tokens: bool = field(
+        default=False,
+        metadata={"help": "Also apply the LM cross-entropy at target speech positions (label = 'continue' placeholder), so the "
+                          "decision to keep speaking vs emit speech_end is supervised at every step. Upstream default never trains it."},
+    )
+    ce_skip_text_prefix: bool = field(
+        default=False,
+        metadata={"help": "Drop the LM cross-entropy on everything before the first target latent (system prompt, voice prompts, "
+                          "transcript text). Keeps speech_end/eos and, with --ce_include_speech_tokens, the continue decisions."},
+    )
     debug_ce_details: bool = field(default=False)
     debug_ce_topk: int = field(default=5)
     debug_ce_max_examples: int = field(default=1)
@@ -185,11 +195,38 @@ def build_head_lora_config(args: ModelArguments) -> LoraConfig:
         target_modules=target_modules,
     )
 
-def mask_for_ce(labels: torch.Tensor, attention_mask: torch.Tensor, acoustic_input_mask: torch.Tensor, pad_id: int = -100) -> torch.Tensor:
+def mask_for_ce(
+    labels: torch.Tensor,
+    attention_mask: torch.Tensor,
+    acoustic_input_mask: torch.Tensor,
+    pad_id: int = -100,
+    acoustic_loss_mask: Optional[torch.Tensor] = None,
+    include_speech_tokens: bool = False,
+    skip_text_prefix: bool = False,
+) -> torch.Tensor:
+    """Next-token labels for the LM cross-entropy.
+
+    Default (upstream behaviour): every non-acoustic token is a label, so the LM learns the text
+    prefix, the voice-prompt scaffolding and the final speech_end/eos, but is never asked about the
+    positions where it must decide to *keep speaking*. With ``include_speech_tokens`` the target
+    placeholders themselves become labels (the token there is speech_diffusion_id, i.e. "continue"),
+    so the continue-vs-stop decision is supervised at every step of the target; voice-prompt
+    placeholders stay masked. With ``skip_text_prefix`` everything before the first target latent is
+    dropped from the loss, so the LM is not pushed to model the transcript text itself.
+    """
     shifted = labels[:, 1:].contiguous()
     base_mask = attention_mask[:, 1:].contiguous().eq(1) if (attention_mask is not None and attention_mask.numel() > 0) else torch.ones_like(shifted, dtype=torch.bool)
     label_is_acoustic = acoustic_input_mask[:, 1:].contiguous()
     final_mask = base_mask & (~label_is_acoustic)
+    if acoustic_loss_mask is not None and (include_speech_tokens or skip_text_prefix):
+        label_is_target = acoustic_loss_mask[:, 1:].contiguous()
+        if include_speech_tokens:
+            final_mask = base_mask & ((~label_is_acoustic) | label_is_target)
+        if skip_text_prefix:
+            has_target = acoustic_loss_mask.any(dim=1)
+            first_target = torch.where(has_target, acoustic_loss_mask.float().argmax(dim=1), torch.zeros_like(has_target, dtype=torch.long))
+            positions = torch.arange(1, labels.size(1), device=labels.device).unsqueeze(0)  # token index of each label
+            final_mask = final_mask & ((positions >= first_target.unsqueeze(1)) | (~has_target).unsqueeze(1))
     out = shifted.clone()
     out[~final_mask] = pad_id
     return out
@@ -820,7 +857,12 @@ def main() -> None:
 
             # CE Loss
             logits = outputs.logits
-            ce_labels = mask_for_ce(labels, attention_mask, acoustic_input_mask, pad_id=-100)
+            ce_labels = mask_for_ce(
+                labels, attention_mask, acoustic_input_mask, pad_id=-100,
+                acoustic_loss_mask=inputs.get("acoustic_loss_mask"),
+                include_speech_tokens=getattr(training_args, "ce_include_speech_tokens", False),
+                skip_text_prefix=getattr(training_args, "ce_skip_text_prefix", False),
+            )
             shift_logits = logits[:, :-1, :].contiguous()
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
             ce_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), ce_labels.view(-1))

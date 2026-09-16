@@ -92,3 +92,9 @@ Windows of 60 s are about 450 speech tokens plus prompts; a 24 GB GPU handles th
 ### New language
 
 The same path teaches a new language: the text tokenizer (Qwen2.5) already covers most scripts byte-wise, so nothing needs to be added to the vocabulary; the LoRA on the language model and the trained diffusion head learn the pronunciation from your audio. Expect to need several hours of clean, accurately transcribed speech, and judge checkpoints by listening.
+
+### Keeping the model talking: `--ce_include_speech_tokens` and `--ce_skip_text_prefix`
+
+The default LM cross-entropy has two properties that hurt long, multi-turn generation. It never supervises the positions where the model must decide to *keep speaking* (those labels are acoustic placeholders and are masked out), while it does supervise the single `speech_end` at the end of every window, so fine-tuning biases the model toward stopping early. And most of its mass is spent predicting the transcript text itself, which for a new language is a large, irrelevant objective (cross-entropy started above 20 on Yiddish transcripts) that drags the LoRA away from speech behaviour. On a Yiddish podcast run the generated length collapsed from 48 s at step 200 to 14 s at step 600; raising `--cfg_scale` to 3.0 at inference recovered the full script, which shows the conditioning was intact and only the stop decision had drifted.
+
+`--ce_include_speech_tokens True` adds the target placeholders as labels (the "continue" token), so continue-vs-stop is trained at every step; `--ce_skip_text_prefix True` drops the loss on everything before the first target latent. With both, the cross-entropy covers only continue decisions, `speech_end` and `eos`, so raise `--ce_loss_weight` to about 1.0. Both default to off to keep older recipes unchanged.

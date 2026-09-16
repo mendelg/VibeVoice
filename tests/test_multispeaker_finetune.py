@@ -192,3 +192,31 @@ def test_dataset_multispeaker_without_prompts_trains_promptless(processor):
     ds_bad = VibeVoiceDataset([dict(text="Speaker 1: a\nSpeaker 2: b", audio=target, voice_prompts=["x.wav"])])
     with pytest.raises(ValueError):
         ds_bad[0]
+
+
+# ----------------------------------------------------------------------------- LM cross-entropy labels
+
+def test_mask_for_ce_supervises_continue_and_skips_prefix():
+    import torch
+    from vibevoice.finetune.train_vibevoice import mask_for_ce
+    # tokens: [sys, sys, P, P, txt, txt, start, T, T, T, end, eos, pad]  (P = prompt latents, T = target latents)
+    ids = torch.tensor([[10, 11, 99, 99, 12, 13, 50, 99, 99, 99, 51, 52, 0]])
+    attn = torch.tensor([[1] * 12 + [0]])
+    ain = torch.tensor([[False, False, True, True, False, False, False, True, True, True, False, False, False]])
+    aloss = torch.tensor([[False] * 7 + [True] * 3 + [False] * 3])
+
+    default = mask_for_ce(ids, attn, ain)[0].tolist()
+    assert default == [11, -100, -100, 12, 13, 50, -100, -100, -100, 51, 52, -100]  # upstream: no 'continue' labels
+
+    cont = mask_for_ce(ids, attn, ain, acoustic_loss_mask=aloss, include_speech_tokens=True)[0].tolist()
+    assert cont == [11, -100, -100, 12, 13, 50, 99, 99, 99, 51, 52, -100]  # target placeholders supervised, prompt ones not
+
+    both = mask_for_ce(ids, attn, ain, acoustic_loss_mask=aloss, include_speech_tokens=True, skip_text_prefix=True)[0].tolist()
+    assert both == [-100] * 6 + [99, 99, 99, 51, 52, -100]  # only continue decisions, speech_end and eos remain
+
+    skip_only = mask_for_ce(ids, attn, ain, acoustic_loss_mask=aloss, skip_text_prefix=True)[0].tolist()
+    assert skip_only == [-100] * 9 + [51, 52, -100]
+
+    # a row without any target keeps the upstream labels under skip_text_prefix
+    none_loss = torch.zeros_like(aloss)
+    assert mask_for_ce(ids, attn, ain, acoustic_loss_mask=none_loss, skip_text_prefix=True)[0].tolist() == default
