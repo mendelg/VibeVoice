@@ -337,11 +337,19 @@ def main() -> None:
     except Exception as e:
         logger.warning(f"LM head tie diagnostics failed: {e}")
 
-    # Hard-tie LM head
+    # Hard-tie LM head, but only for models whose config ties it (Qwen2.5-1.5B). Qwen2.5-7B has a
+    # separate lm_head; tying it to the input embeddings replaces the trained head with garbage
+    # (text CE ~12 instead of ~0) and trains the LoRA against logits inference will never see.
     try:
         emb_module = model.get_input_embeddings()
         head_module = model.get_output_embeddings()
-        if hasattr(emb_module, "weight") and hasattr(head_module, "weight"):
+        try:
+            tie_cfg = bool(getattr(getattr(model.config, "decoder_config", model.config), "tie_word_embeddings", False))
+        except Exception:
+            tie_cfg = bool(getattr(model.config, "tie_word_embeddings", False))
+        if not tie_cfg:
+            logger.info("LM head is untied in this model's config; leaving it untied.")
+        elif hasattr(emb_module, "weight") and hasattr(head_module, "weight"):
             if emb_module.weight.shape == head_module.weight.shape and emb_module.weight.data_ptr() != head_module.weight.data_ptr():
                 with torch.no_grad():
                     head_module.weight = emb_module.weight
