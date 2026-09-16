@@ -958,13 +958,9 @@ def main() -> None:
                     os.makedirs(ph_dir, exist_ok=True)
                     pred_head.save_pretrained(ph_dir)
     
-                # --- ALWAYS save FULL diffusion head state_dict for fallback ---
+                # --- ALWAYS save FULL diffusion head state_dict for fallback (once; lora_loading falls back to it) ---
                 if pred_head is not None and hasattr(pred_head, "state_dict"):
-                    sd = pred_head.state_dict()
-                    torch.save(sd, os.path.join(lora_out, "diffusion_head_full.bin"))
-                    ph_dir = os.path.join(lora_out, "diffusion_head")
-                    os.makedirs(ph_dir, exist_ok=True)
-                    torch.save(sd, os.path.join(ph_dir, "diffusion_head_full.bin"))
+                    torch.save(pred_head.state_dict(), os.path.join(lora_out, "diffusion_head_full.bin"))
     
                 # --- Connectors (plain state_dicts) ---
                 ac = getattr(self.model.model, "acoustic_connector", None)
