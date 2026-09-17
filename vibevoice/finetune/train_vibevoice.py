@@ -1048,7 +1048,16 @@ def main() -> None:
 
     # Resolve which adapters to apply in samples
 
-    callbacks = [LoRADebugCallback(log_every_n_steps=(int(getattr(training_args, "logging_steps", 50) or 50)))]
+    class EmptyCacheAfterEval(TrainerCallback):
+        """Release cached GPU memory after evaluation/save. Non-finite gradients appeared in the first steps after
+        each evaluation on long-sequence batches; a fragmented allocator can push attention onto a fallback kernel
+        that overflows in bf16. Clearing the cache costs milliseconds."""
+        def on_evaluate(self, args, state, control, **kwargs):
+            if torch.cuda.is_available(): torch.cuda.empty_cache()
+        def on_save(self, args, state, control, **kwargs):
+            if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+    callbacks = [LoRADebugCallback(log_every_n_steps=(int(getattr(training_args, "logging_steps", 50) or 50))), EmptyCacheAfterEval()]
     if getattr(training_args, "ema_head", False):
         callbacks.insert(0, EmaCallback(attr_path="model.prediction_head", decay=0.999, device="cpu"))
         logger.info("EMA of the diffusion head enabled (swapped in at eval/save).")
