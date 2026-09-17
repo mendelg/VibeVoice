@@ -885,6 +885,16 @@ def main() -> None:
             diffusion_loss = outputs.diffusion_loss if outputs.diffusion_loss is not None else torch.tensor(0.0, device=ce_loss.device)
             total = training_args.ce_loss_weight * ce_loss + training_args.diffusion_loss_weight * diffusion_loss
 
+            # A single non-finite batch (e.g. a silent or corrupt clip) would poison the LoRA for the rest of the run.
+            # Skip it: contribute a zero loss that still touches the trainable parameters so DDP/accumulation stay in sync.
+            if not torch.isfinite(total):
+                self._nonfinite_batches = getattr(self, "_nonfinite_batches", 0) + 1
+                logger.warning(f"Non-finite loss (ce={ce_loss.item() if torch.isfinite(ce_loss) else 'nan'}, "
+                               f"diffusion={float(diffusion_loss) if torch.isfinite(diffusion_loss) else 'nan'}); "
+                               f"skipping batch #{self._nonfinite_batches}")
+                zero = sum(p.sum() for p in model.parameters() if p.requires_grad) * 0.0
+                return (zero, outputs) if return_outputs else zero
+
             # Logs
             try:
                 prefix = "train" if model.training else "eval"
