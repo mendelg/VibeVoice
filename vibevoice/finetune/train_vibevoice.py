@@ -889,9 +889,17 @@ def main() -> None:
             # Skip it: contribute a zero loss that still touches the trainable parameters so DDP/accumulation stay in sync.
             if not torch.isfinite(total):
                 self._nonfinite_batches = getattr(self, "_nonfinite_batches", 0) + 1
+                try:
+                    st = inputs.get("speech_tensors"); ids = inputs.get("input_ids")
+                    shape = (f"input_ids={tuple(ids.shape)}, speech_segments={tuple(st.shape) if st is not None else None}, "
+                             f"acoustic_tokens={int(acoustic_input_mask.sum().item())}, "
+                             f"speech_max_abs={float(st.abs().max().item()) if st is not None else 'n/a'}, "
+                             f"speech_finite={bool(torch.isfinite(st).all().item()) if st is not None else 'n/a'}")
+                except Exception:
+                    shape = "shape unavailable"
                 logger.warning(f"Non-finite loss (ce={ce_loss.item() if torch.isfinite(ce_loss) else 'nan'}, "
                                f"diffusion={float(diffusion_loss) if torch.isfinite(diffusion_loss) else 'nan'}); "
-                               f"skipping batch #{self._nonfinite_batches}")
+                               f"skipping batch #{self._nonfinite_batches}; {shape}")
                 zero = sum(p.sum() for p in model.parameters() if p.requires_grad) * 0.0
                 return (zero, outputs) if return_outputs else zero
 
