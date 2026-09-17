@@ -819,7 +819,27 @@ def main() -> None:
                 attentions=outputs.attentions,
             )
 
+        def training_step(self, model, inputs, num_items_in_batch=None):
+            """Run the normal step, then refuse to let non-finite gradients reach the optimizer.
+            A finite loss can still back-propagate inf/nan (e.g. a degenerate segment); one such step corrupts
+            the LoRA for good. Zero the gradients instead and name the rows in the batch."""
+            row_ids = inputs.pop("row_ids", None)
+            loss = super().training_step(model, inputs, num_items_in_batch)
+            bad = False
+            for p in model.parameters():
+                if p.requires_grad and p.grad is not None and not torch.isfinite(p.grad).all():
+                    bad = True; break
+            if bad:
+                self._bad_grad_batches = getattr(self, "_bad_grad_batches", 0) + 1
+                for p in model.parameters():
+                    if p.grad is not None: p.grad.zero_()
+                logger.warning(f"Non-finite GRADIENTS in batch #{self._bad_grad_batches}; zeroed. rows={row_ids}")
+                if self._bad_grad_batches > 50:
+                    raise RuntimeError("More than 50 batches with non-finite gradients; check the data.")
+            return loss
+
         def compute_loss(self, model: VibeVoiceForConditionalGeneration, inputs: Dict[str, Any], return_outputs=False, num_items_in_batch: Optional[int] = None):
+            row_ids = inputs.pop("row_ids", None)
             labels = inputs.get("input_ids")
             attention_mask = inputs.get("attention_mask")
             acoustic_input_mask = inputs.get("acoustic_input_mask")
@@ -910,7 +930,7 @@ def main() -> None:
                     shape = "shape unavailable"
                 logger.warning(f"Non-finite loss (ce={ce_loss.item() if torch.isfinite(ce_loss) else 'nan'}, "
                                f"diffusion={float(diffusion_loss) if torch.isfinite(diffusion_loss) else 'nan'}); "
-                               f"skipping batch #{self._nonfinite_batches}; {shape}")
+                               f"skipping batch #{self._nonfinite_batches}; rows={row_ids}; {shape}")
                 zero = sum(p.sum() for p in model.parameters() if p.requires_grad) * 0.0
                 return (zero, outputs) if return_outputs else zero
 
@@ -935,6 +955,7 @@ def main() -> None:
             """Evaluation: the batches carry no 'labels' key, so the stock Trainer would skip the loss
             and report only the runtime. Compute the same CE + diffusion loss as training instead,
             so eval_loss on held-out episodes is a real overfitting signal."""
+            inputs = dict(inputs); inputs.pop("row_ids", None)
             inputs = self._prepare_inputs(inputs)
             with torch.no_grad():
                 loss = self.compute_loss(model, inputs)

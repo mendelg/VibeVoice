@@ -62,6 +62,7 @@ class VibeVoiceDataset:
         data: Dict[str, Any] = {}
         data["text"] = item[self.text_column]
         data["audio"] = item[self.audio_column]
+        data["row_id"] = str(item.get("id", idx)) if isinstance(item, dict) else str(idx)
 
         user_provided_prompt = None
         if self.voice_prompts_column and self.voice_prompts_column in item:
@@ -469,6 +470,7 @@ class VibeVoiceCollator:
                 assert speech_tensors_tensor.dim() == 2, "Expected speech_tensors 2D [segments, samples]"
 
         return {
+            "row_ids": [str(ex.get("row_id", "?")) for ex in features],
             "input_ids": input_ids_tensor,
             "attention_mask": attention_mask_tensor,
             "speech_tensors": speech_tensors_tensor,
