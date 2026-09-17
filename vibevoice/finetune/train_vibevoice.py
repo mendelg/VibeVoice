@@ -160,6 +160,12 @@ class CustomTrainingArguments(HfTrainingArguments):
         metadata={"help": "Drop the LM cross-entropy on everything before the first target latent (system prompt, voice prompts, "
                           "transcript text). Keeps speech_end/eos and, with --ce_include_speech_tokens, the continue decisions."},
     )
+    ema_head: bool = field(
+        default=False,
+        metadata={"help": "Keep an EMA copy of the diffusion head and swap it in for eval/save (upstream behaviour). Off by "
+                          "default: the swap-back hooks (on_evaluate_end/on_save_end) do not exist in transformers, so the head "
+                          "silently kept the EMA weights after the first eval, and on one run those were non-finite."},
+    )
     debug_ce_details: bool = field(default=False)
     debug_ce_topk: int = field(default=5)
     debug_ce_max_examples: int = field(default=1)
@@ -889,6 +895,11 @@ def main() -> None:
             # Skip it: contribute a zero loss that still touches the trainable parameters so DDP/accumulation stay in sync.
             if not torch.isfinite(total):
                 self._nonfinite_batches = getattr(self, "_nonfinite_batches", 0) + 1
+                self._nonfinite_streak = getattr(self, "_nonfinite_streak", 0) + 1
+                weights_ok = all(torch.isfinite(p).all().item() for p in model.parameters() if p.requires_grad)
+                if not weights_ok or self._nonfinite_streak >= 20:
+                    raise RuntimeError(f"Aborting: {self._nonfinite_streak} consecutive non-finite batches; trainable weights finite={weights_ok}. "
+                                       "Weights are corrupted, continuing would waste GPU time.")
                 try:
                     st = inputs.get("speech_tensors"); ids = inputs.get("input_ids")
                     shape = (f"input_ids={tuple(ids.shape)}, speech_segments={tuple(st.shape) if st is not None else None}, "
@@ -917,6 +928,7 @@ def main() -> None:
             except Exception:
                 pass
 
+            self._nonfinite_streak = 0
             return (total, outputs) if return_outputs else total
 
         def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -1009,7 +1021,12 @@ def main() -> None:
 
     # Resolve which adapters to apply in samples
 
-    ema_cb = EmaCallback(attr_path="model.prediction_head", decay=0.999, device="cpu")
+    callbacks = [LoRADebugCallback(log_every_n_steps=(int(getattr(training_args, "logging_steps", 50) or 50)))]
+    if getattr(training_args, "ema_head", False):
+        callbacks.insert(0, EmaCallback(attr_path="model.prediction_head", decay=0.999, device="cpu"))
+        logger.info("EMA of the diffusion head enabled (swapped in at eval/save).")
+    else:
+        logger.info("EMA of the diffusion head disabled (--ema_head to enable).")
 
     trainer = VibeVoiceTrainer(
         model=model,
@@ -1017,7 +1034,7 @@ def main() -> None:
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        callbacks=[ema_cb, LoRADebugCallback(log_every_n_steps=(int(getattr(training_args, "logging_steps", 50) or 50)))],
+        callbacks=callbacks,
     )
 
     # Optional debug pre-training save
