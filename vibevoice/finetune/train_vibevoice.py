@@ -139,6 +139,11 @@ class DataArguments:
         default=0.0,
         metadata={"help": "Probability to drop conditioning voice prompt during training (0.0 keep always, 1.0 drop always)."},
     )
+    normalize_target_audio: bool = field(
+        default=True,
+        metadata={"help": "Loudness-normalize target clips to the processor's -25 dBFS like voice prompts (clip-safe). "
+                          "Prevents hot/clipped clips from overflowing the bf16 audio encoder."},
+    )
     normalize_speaker_ids: bool = field(
         default=False,
         metadata={"help": "Renumber 'Speaker N:' lines to 0..N-1 by first appearance and align voice_prompts with them "
@@ -598,6 +603,7 @@ def main() -> None:
         compute_semantics=compute_semantics_flag,
         debug_checks=False,
         voice_prompt_drop_rate=data_args.voice_prompt_drop_rate,
+        normalize_target_audio=data_args.normalize_target_audio,
     )
 
     class LoRADebugCallback(TrainerCallback):

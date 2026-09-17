@@ -239,6 +239,10 @@ class VibeVoiceCollator:
     audio_field: str = "audio"
     voice_prompts_field: str = "voice_prompts"
     voice_prompt_drop_rate: float = 0.0
+    # Loudness-normalize the TARGET audio like the processor does for voice prompts (-25 dBFS, clip-safe).
+    # Upstream fed raw targets; a hot, clipped broadcast clip overflowed the bf16 audio encoder's backward
+    # pass and poisoned a run with non-finite gradients.
+    normalize_target_audio: bool = True
 
     def __call__(self, features: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         batch_size = len(features)
@@ -280,7 +284,10 @@ class VibeVoiceCollator:
                 speech_input_mask = torch.zeros_like(proc["input_ids"], dtype=torch.bool)
             speech_input_mask_list = speech_input_mask[0].tolist()
 
-            wav_target = _load_audio_to_24k(target_audio, target_sr=24000, augment_with_silence=True)
+            wav_target = _load_audio_to_24k(target_audio, target_sr=24000, augment_with_silence=False)
+            if self.normalize_target_audio and getattr(self.processor, "audio_normalizer", None) is not None:
+                wav_target = np.asarray(self.processor.audio_normalizer(wav_target), dtype=np.float32)
+            wav_target = _apply_silence_with_crossfade(wav_target, sample_rate=24000)
             # Prefer exact frame count from acoustic tokenizer if available; fallback to compress ratio
             target_latent_len = None
             try:
